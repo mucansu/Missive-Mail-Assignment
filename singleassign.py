@@ -296,13 +296,12 @@ def run_assignment_process():
         assign_group_to_paralegal(group)
 
 # Loop to run the process every minute
-""" def main():
- while True:
-        print("\nStarting the assignment process...")
+def main():
+
+    
         run_assignment_process()
-        print("Waiting for 60 seconds before the next check...\n")
-        time.sleep(60)
-"""
+       
+
 # Run the main function
 if __name__ == "__main__":
    # main()
