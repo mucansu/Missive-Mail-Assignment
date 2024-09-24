@@ -1,0 +1,25 @@
+name: Run Python Script Every Minute
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'  # 5 Dakikada bir çalıştırmak için cron ayarı
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.x'  # Kullanmak istediğin Python sürümü
+
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt || true  # Eğer bağımlılıklar varsa kurar, yoksa hatayı geçer
+
+    - name: Run Script
+      run: python singleassign.py  # Scriptini çalıştırır
