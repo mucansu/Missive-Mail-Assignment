@@ -12,12 +12,13 @@ import logging
 import math  
 import os
 import difflib
+import unicodedata
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 EOIR_TEAM_ID = 'e3aa36e4-d631-488d-8002-35f8e85bb824'
 CSV_FILE_PATH = "cases.csv"  # Orijinal CSV dosyasının yolu
-FILTERED_CSV_FILE = "filtered_cases.csv"  # Filtrelenmiş CSV'nin yolu
+FILTERED_CSV_FILE = "defensive_cases_with_a_numbers.csv"  # Filtrelenmiş CSV'nin yolu
 
 TIME_WINDOW_MINUTES = 30  # aile üye mailleri için offset time, aynı soyisimde unassigned-assigned mailler varsa aynı paralegale assign et.
 @dataclass
@@ -55,7 +56,9 @@ def process_client_data(df):
         case_name = row['Case/Matter Name']
         lead_attorney = row['Lead Attorney']
         originating_attorney = row['Originating Attorney'] 
-        
+        lead_attorney = lead_attorney.strip() if isinstance(lead_attorney, str) else ''
+        originating_attorney = originating_attorney.strip() if isinstance(originating_attorney, str) else ''
+
         if pd.isnull(case_name) or (pd.isnull(lead_attorney) and pd.isnull(originating_attorney)):
             continue
         #if pd.isnull(lead_attorney):
@@ -200,32 +203,38 @@ def process_messages(messages_data, conversation_id):
             conversation_id=conversation_id
         ))
     return messages
+def normalize_turkish_chars(s):
+    if not isinstance(s, str):
+        s = str(s)
+    turkish_char_map = {
+        'ç': 'c', 'Ç': 'C',
+        'ğ': 'g', 'Ğ': 'G',
+        'ı': 'i', 'İ': 'I',
+        'ö': 'o', 'Ö': 'O',
+        'ş': 's', 'Ş': 'S',
+        'ü': 'u', 'Ü': 'U'
+    }
+    return ''.join(turkish_char_map.get(c, c) for c in s)
 def find_closest_missive_user_name(name, users, cutoff_ratio=0.8):
     """
     Given a name string and a list of user dicts with 'name' fields,
-    returns the user dict that is the closest match by difflib.
+    returns the user dict that is the closest match using difflib.
     """
     if not name:
         return None
+
     # Normalize the target name
     normalized_target = normalize_turkish_chars(name).lower()
 
-    # Collect normalized candidate names
+    # Normalize all candidate names from the users list
     user_names = [u['name'] for u in users]
     normalized_names = [normalize_turkish_chars(n).lower() for n in user_names]
 
-    # Use difflib to find the best match in normalized_names
-    matches = difflib.get_close_matches(
-        normalized_target,
-        normalized_names,
-        n=1,
-        cutoff=cutoff_ratio
-    )
+    # Use difflib to find the best match
+    matches = difflib.get_close_matches(normalized_target, normalized_names, n=1, cutoff=cutoff_ratio)
     if matches:
-        # `best_match` is the closest normalized name
         best_match = matches[0]
-        # Find the user dict corresponding to that normalized name
-        # We'll do a simple loop to map it back
+        # Map the best normalized match back to its corresponding user dictionary
         for user, norm_name in zip(users, normalized_names):
             if norm_name == best_match:
                 return user
@@ -326,6 +335,41 @@ def apply_assignment_rules(paralegal_name):
         paralegal_name = "Ismail Dislik"
     return paralegal_name
 
+def match_client_to_originating_attorney(client_details, a_number=None):
+    """
+    Verilen client detaylarına göre originating attorney bilgisini döner.
+
+    Args:
+        client_details (dict): {'first_name': '...', 'surname': '...'}
+        a_number (str, optional): A-Number varsa ek eşleştirme için kullanılır.
+
+    Returns:
+        str or None: Originating attorney adı ya da eşleşme bulunamazsa None.
+    """
+    full_name = f"{client_details.get('first_name', '')} {client_details.get('surname', '')}".strip().upper()
+    normalized_full_name = normalize_name(full_name)
+    surname = normalize_name(client_details.get('surname', ''))
+
+    # 1. Tam eşleşme
+    for client in clients:
+        client_full_name = f"{client.first_name} {client.last_name}".strip().upper()
+        if normalize_name(client_full_name) == normalized_full_name:
+            return client.originating_attorney if client.originating_attorney else None
+
+    # 2. Tekil soyad eşleşmesi
+    surname_matches = [client for client in clients if normalize_name(client.last_name) == surname]
+    if len(surname_matches) == 1:
+        return surname_matches[0].originating_attorney if surname_matches[0].originating_attorney else None
+
+    # 3. A Number ile eşleşme (ileride eklenecekse kullanılabilir)
+    if a_number:
+        for client in clients:
+            if getattr(client, 'a_number', None) == a_number:
+                return client.originating_attorney if client.originating_attorney else None
+
+    return None
+
+
 def match_client_to_paralegal(client_details,a_number=None):
     full_name = f"{client_details.get('first_name', '')} {client_details.get('surname', '')}".strip().upper()
     normalized_full_name = normalize_name(full_name)
@@ -349,10 +393,10 @@ def match_client_to_paralegal(client_details,a_number=None):
         if len(surname_matches) == 1:
             # Mycase üzerindeki kişilerde tek bir soyisim eşleşmesi varsa assign et geç
             client = surname_matches[0]
-            if client.lead_attorney:
+            if client.lead_attorney != '':
                 return client.lead_attorney
-            elif client.originating_attorney:
-                logger.info(f"Lead Attorney bulunamadı, Originating Attorney atanıyor: {client.originating_attorney}")
+            elif client.originating_attorney != '':
+                logger.info(f" {normalized_client_full_name} için Lead Attorney bulunamadı, Originating Attorney atanıyor: {client.originating_attorney}")
                 return client.originating_attorney
         else:
             # Birden fazla veya hiç eşleşme yoksa
@@ -383,7 +427,8 @@ def assign_conversation_to_paralegal(conversation_id, paralegal_name):
     if paralegal_name is None:
         logger.error(f"No paralegal name provided for conversation {conversation_id}.")
         return False
-    paralegal_user = next((user for user in test.users if user['name'].strip() == paralegal_name.strip()), None)
+    paralegal_user = find_closest_missive_user_name(paralegal_name, test.users, cutoff_ratio=0.8)
+
     if not paralegal_user:
         logger.error(f"Paralegal '{paralegal_name}' not found in Missive users.")
         return False
@@ -420,36 +465,16 @@ def assign_conversation_to_paralegal(conversation_id, paralegal_name):
 
 # main module
 def run_assignment_process():
+    
     end_date = datetime.now(timezone.utc)
-    start_date = end_date - timedelta(days=3)  # 1 gün geriden kontrol
+    start_date = end_date - timedelta(days=3)  # 3 gün geriden kontrol
     conversations = fetch_unassigned_conversations(EOIR_TEAM_ID, start_date=start_date, end_date=end_date)
     if not conversations:
         return
 
-    # Yeni ek: 1 haftadan eski konuşmaları silelim, diğerlerini işleyelim
-    one_week_ago = datetime.now(timezone.utc) - timedelta(days=7)
-
-    # İki listeye ayırıyoruz: eski konuşmalar (sil), yeni konuşmalar (assign)
-    old_conversations = []
-    recent_conversations = []
-    for conv in conversations:
-        if conv.last_activity < one_week_ago:
-            old_conversations.append(conv)
-        else:
-            recent_conversations.append(conv)
-
-    # Eski konuşmaları sil
-    for conv in old_conversations:
-        delete_conversation(conv.id)
-        time.sleep(1)
-
-    # Kalanları mevcut mantıkla işleyelim
-    if not recent_conversations:
-        return
-
     all_messages = []
 
-    for conversation in recent_conversations:
+    for conversation in conversations:
         try:
             messages = fetch_conversation_messages(conversation.id)
             if messages:
@@ -531,6 +556,8 @@ def group_and_assign_messages(messages):
                     assign_conversation_to_paralegal(message.conversation_id, paralegal_name)
                     if paralegal_name == "Ismail Dislik":
                         assign_conversation_to_paralegal(message.conversation_id, "Arda Mert Geldi")
+                        assign_conversation_to_paralegal(message.conversation_id, "Elifsu Coban")
+                    
             else:
                 # No paralegal found, log for manual review
                 for message in group:
@@ -586,6 +613,7 @@ def process_message(message, assigned_paralegals):
         assign_conversation_to_paralegal(message.conversation_id, paralegal_name)
         if paralegal_name == "Ismail Dislik":
             assign_conversation_to_paralegal(message.conversation_id, "Arda Mert Geldi")
+            assign_conversation_to_paralegal(message.conversation_id, "Elifsu Coban")
     else:
         logger.info(f"No paralegal found for '{full_name}'. Please review manually.")
 # Main Loop
@@ -625,5 +653,6 @@ def create_filtered_csv():
 
 if __name__ == "__main__":
     start_time = datetime.now()
-    create_filtered_csv()
+    #time.sleep(300)
+    #create_filtered_csv()
     main()
